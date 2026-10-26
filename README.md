@@ -1,77 +1,83 @@
-# RAM Guard — плагин Unraid
+# RAM Guard — Unraid plugin
 
-Следит за загрузкой оперативной памяти. Если она держится выше порога, останавливает Docker-контейнер, который занимает больше всего RAM:
+Monitors RAM usage. When usage stays above the stop threshold, RAM Guard stops the Docker container that uses the most memory:
 
-| Загрузка RAM | Что происходит |
+| RAM usage | What happens |
 |---|---|
-| ≥ 90% (порог предупреждения) | уведомление Unraid со списком самых крупных контейнеров |
-| ≥ 95% дольше 15 с (порог остановки) | `docker stop` самого крупного контейнера и уведомление |
-| всё ещё ≥ 95% через 120 с | останавливается следующий по размеру контейнер |
+| ≥ 90% (warning threshold) | Unraid notification listing the largest containers |
+| ≥ 95% for more than 15 s (stop threshold) | `docker stop` on the largest container, plus a notification |
+| still ≥ 95% after 120 s | the next largest container is stopped |
 
-Все пороги и интервалы меняются в настройках.
+All thresholds and intervals can be changed in the settings.
 
-## Установка
+## Installation
 
-1. В Unraid откройте **Plugins → Install Plugin** и вставьте ссылку:
+1. In Unraid, go to **Plugins → Install Plugin** and paste this URL:
 
    ```
    https://raw.githubusercontent.com/factorjx/unraid-ram-guard/main/ram.guard.plg
    ```
 
-   Нажмите **Install**. То же самое по SSH:
+   Click **Install**. The same over SSH:
    `plugin install https://raw.githubusercontent.com/factorjx/unraid-ram-guard/main/ram.guard.plg`
-2. Настройки: **Settings → User Utilities → RAM Guard**.
+2. Settings: **Settings → User Utilities → RAM Guard**.
 
-Плагин сохраняется в `/boot/config/plugins/` и запускается при каждой загрузке сервера. Новые версии появляются на вкладке **Plugins** после **Check for Updates**.
+The plugin is saved to `/boot/config/plugins/` and starts on every boot. New versions show up on the **Plugins** tab after **Check for Updates**.
 
-Без интернета: скачайте `ram.guard.plg`, положите его на флешку (например, в `/boot/ram.guard.plg`) и укажите этот путь вместо ссылки.
+Offline install: download `ram.guard.plg`, copy it to the flash drive (for example `/boot/ram.guard.plg`), and enter that path instead of the URL.
 
-## Как проверить
+> The settings page, notifications and log are currently in Russian.
 
-На странице настроек в блоке «Контейнеры сейчас» видно, сколько занимает каждый контейнер и какой будет остановлен первым. То же самое в консоли:
+## Checking that it works
+
+The "containers now" block on the settings page shows how much memory each container uses and which one would be stopped first. The same from the console:
 
 ```
 /usr/local/emhttp/plugins/ram.guard/scripts/ramguard status
 ```
 
-Для пробного запуска включите **Тестовый режим**. Тогда плагин только пишет в журнал и уведомления, какой контейнер был бы остановлен.
+For a trial run, enable **dry run** mode. RAM Guard then only reports, in the log and in notifications, which container it would have stopped.
 
-## Настройки
+## Settings
 
-| Параметр | По умолчанию | Описание |
+Listed in the same order as on the settings page.
+
+| Setting | Default | Description |
 |---|---|---|
-| Порог предупреждения | 90% | только уведомление |
-| Порог остановки | 95% | остановка самого крупного контейнера |
-| Держится выше порога | 15 с | защита от кратковременных всплесков; 0 — сразу |
-| Интервал проверки | 5 с | |
-| Пауза после остановки | 120 с | время на освобождение памяти до следующего решения |
-| Не останавливать контейнеры меньше | 512 МБ | если память заняли VM, ZFS или система, мелкие контейнеры не трогаются, приходит только уведомление |
-| Исключения | — | `mariadb, plex, binhex-*`: регистр не важен, можно `*` и `?` |
-| Таймаут остановки | 30 с | `docker stop -t`, после него контейнер завершается принудительно |
-| ZFS ARC как свободная память | да | кеш ZFS сверх `c_min` считается свободной памятью, потому что он сам сжимается при нехватке RAM |
-| Повторять предупреждения не чаще | 30 мин | уведомления об остановке контейнера отправляются всегда |
-| Тестовый режим | нет | ничего не останавливать, только сообщать |
+| Enabled | yes | when disabled, the daemon does not run |
+| Warning threshold | 90% | notification only |
+| Stop threshold | 95% | the largest container is stopped |
+| Time above threshold | 15 s | protection against short spikes; 0 means act immediately |
+| Check interval | 5 s | |
+| Cooldown after a stop | 120 s | time for memory to be released before the next decision |
+| Minimum container size | 512 MB | if memory is taken by VMs, ZFS or the system, small containers are left alone and only a notification is sent |
+| Exclusions | — | `mariadb, plex, binhex-*`: case-insensitive, `*` and `?` wildcards allowed |
+| Stop timeout | 30 s | `docker stop -t`; after it the container is killed |
+| Count ZFS ARC as free memory | yes | ZFS cache above `c_min` counts as free, because the ARC shrinks on its own when RAM runs low |
+| Unraid notifications | yes | |
+| Repeat warnings at most every | 30 min | notifications about stopped containers are always sent |
+| Dry run | no | stop nothing, only report |
 
-## Как считается память
+## How memory is measured
 
-Занятая память = `MemTotal − MemAvailable` из `/proc/meminfo`, то есть файловый кеш не считается занятым. Это ближе к реальной нехватке памяти, чем цифра «used» на Dashboard. Память контейнеров берётся из `docker stats`, это те же числа, что на вкладке Docker.
+Used memory = `MemTotal − MemAvailable` from `/proc/meminfo`, so the file cache does not count as used. This is closer to a real memory shortage than the "used" figure on the Dashboard. Container memory comes from `docker stats`, the same numbers the Docker tab shows.
 
-## Важно знать
+## Good to know
 
-- Останавливаются только Docker-контейнеры, виртуальные машины не трогаются.
-- Остановленный контейнер сам не запускается. Запустите его на вкладке Docker, когда разберётесь с причиной.
-- Базы данных и другие важные контейнеры стоит внести в исключения.
+- Only Docker containers are stopped. Virtual machines are never touched.
+- A stopped container does not start again on its own. Start it from the Docker tab once you have found the cause.
+- Databases and other critical containers belong in the exclusions.
 
-## Файлы
+## Files
 
-| Путь | Что это |
+| Path | What it is |
 |---|---|
-| `/boot/config/plugins/ram.guard/ram.guard.cfg` | настройки (на флешке) |
-| `/var/log/ram.guard.log` | журнал плагина; остановки также пишутся в syslog с тегом `ramguard` |
-| `/usr/local/emhttp/plugins/ram.guard/scripts/rc.ramguard` | `start` / `stop` / `restart` / `status` демона |
+| `/boot/config/plugins/ram.guard/ram.guard.cfg` | settings (on the flash drive) |
+| `/var/log/ram.guard.log` | plugin log; stops are also written to the syslog with the `ramguard` tag |
+| `/usr/local/emhttp/plugins/ram.guard/scripts/rc.ramguard` | `start` / `stop` / `restart` / `status` of the daemon |
 
-Удаление: **Plugins → RAM Guard → Remove**. Демон останавливается, настройки и журнал удаляются.
+Uninstall: **Plugins → RAM Guard → Remove**. The daemon is stopped, and the settings and log are deleted.
 
-## Сборка
+## Building
 
-`ram.guard.plg` собирается из `src/` скриптом `./build.sh`, править нужно файлы в `src/`. Версия — сегодняшняя дата. Чтобы Unraid увидел обновление, версия должна вырасти, поэтому второй выпуск за день собирайте так: `VERSION=2026.10.26.1 ./build.sh`. После сборки закоммитьте `ram.guard.plg` вместе с изменениями в `src/`.
+`ram.guard.plg` is built from `src/` by `./build.sh`; make changes in `src/`. The version is today's date. Unraid only offers an update when the version increases, so build a second release on the same day like this: `VERSION=2026.10.26.1 ./build.sh`. Add an entry to `<CHANGES>` in `build.sh`, then commit `ram.guard.plg` together with the changes in `src/`.

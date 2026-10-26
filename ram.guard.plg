@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "ram.guard">
 <!ENTITY author    "factorjx">
-<!ENTITY version   "2026.10.26">
+<!ENTITY version   "2026.10.26.1">
 <!ENTITY launch    "Settings/RamGuard">
 <!ENTITY plugdir   "/usr/local/emhttp/plugins/&name;">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/factorjx/unraid-ram-guard/main/ram.guard.plg">
@@ -11,10 +11,13 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" icon="shield" min="6.9.0">
 
 <CHANGES>
+### 2026.10.26.1
+- English plugin description and README
+
 ### 2026.10.26
-- Мониторинг RAM, предупреждение при 90%, остановка самого крупного контейнера при 95%
-- Исключения, защита от всплесков, пауза между остановками, тестовый режим
-- Учёт ZFS ARC как свободной памяти
+- RAM monitoring: warning at 90%, the largest container is stopped at 95%
+- Exclusions, spike protection, cooldown between stops, dry run mode
+- ZFS ARC counted as free memory
 </CHANGES>
 
 <!-- Stop a running daemon before its script is overwritten -->
@@ -45,7 +48,7 @@ DRY_RUN="no"
 <FILE Name="&plugdir;/README.md">
 <INLINE><![CDATA[**RAM Guard**
 
-Следит за загрузкой оперативной памяти и, если она держится выше заданного порога (по умолчанию 95%), останавливает Docker-контейнер, который занимает больше всего RAM. При 90% присылает предупреждение. Настройки: Settings → RAM Guard.
+Monitors RAM usage and, when it stays above the stop threshold (95% by default), stops the Docker container that uses the most memory. Sends a warning at 90%. Settings: Settings → User Utilities → RAM Guard.
 ]]></INLINE>
 </FILE>
 

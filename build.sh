@@ -40,10 +40,13 @@ cat <<EOF
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;"${PLUGIN_URL:+ pluginURL=\"&pluginURL;\"} icon="shield" min="6.9.0">
 
 <CHANGES>
-### $VERSION
-- Мониторинг RAM, предупреждение при 90%, остановка самого крупного контейнера при 95%
-- Исключения, защита от всплесков, пауза между остановками, тестовый режим
-- Учёт ZFS ARC как свободной памяти
+### 2026.10.26.1
+- English plugin description and README
+
+### 2026.10.26
+- RAM monitoring: warning at 90%, the largest container is stopped at 95%
+- Exclusions, spike protection, cooldown between stops, dry run mode
+- ZFS ARC counted as free memory
 </CHANGES>
 
 <!-- Stop a running daemon before its script is overwritten -->
