@@ -1,0 +1,123 @@
+Menu="Utilities"
+Title="RAM Guard"
+Icon="shield"
+---
+<?php
+$rg_cfg    = parse_plugin_cfg('ram.guard');
+$rg_status = @parse_ini_file('/tmp/ram.guard/status.ini') ?: [];
+$rg_pid    = trim((string)@file_get_contents('/var/run/ramguard.pid'));
+$rg_alive  = ctype_digit($rg_pid) && is_dir("/proc/$rg_pid");
+$rg_log    = array_slice(@file('/var/log/ram.guard.log', FILE_IGNORE_NEW_LINES) ?: [], -30);
+$rg_states = ['ok' => ['в норме', 'green-text'], 'warning' => ['выше порога предупреждения', 'orange-text'], 'critical' => ['выше порога остановки', 'red-text']];
+[$rg_state_text, $rg_state_class] = $rg_states[$rg_status['state'] ?? ''] ?? ['нет данных', ''];
+?>
+<style>
+#rg-status p{margin:4px 0}
+#rg-status pre{max-height:320px;overflow:auto;padding:8px;border:1px solid rgba(128,128,128,.4);font-size:1.2rem}
+</style>
+
+<div id="rg-status">
+<p><b>Демон:</b>
+<?if ($rg_alive):?><span class="green-text">работает</span> (pid <?=$rg_pid?>)<?else:?><span class="red-text">не запущен</span><?endif;?>
+<?if ($rg_cfg['DRY_RUN'] == 'yes'):?> &mdash; <span class="orange-text">тестовый режим, контейнеры не останавливаются</span><?endif;?>
+</p>
+<?if ($rg_alive && isset($rg_status['pct'])):?>
+<p><b>RAM:</b> <span class="<?=$rg_state_class?>"><?=(int)$rg_status['pct']?>% &mdash; <?=$rg_state_text?></span>
+(<?=round(((int)$rg_status['total_kb'] - (int)$rg_status['avail_kb']) / 1048576, 1)?> из <?=round((int)$rg_status['total_kb'] / 1048576, 1)?> GiB,
+проверено <?=date('H:i:s', (int)$rg_status['updated'])?>)</p>
+<?endif;?>
+
+<p><b>Контейнеры сейчас</b> <a href="#" onclick="rgRefresh();return false" title="Обновить"><i class="fa fa-refresh"></i></a></p>
+<pre id="rg-top">Загрузка...</pre>
+
+<p><b>Журнал</b> (/var/log/ram.guard.log)</p>
+<pre><?=htmlspecialchars($rg_log ? implode("\n", $rg_log) : 'Журнал пуст')?></pre>
+</div>
+
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="ram.guard/ram.guard.cfg">
+<input type="hidden" name="#command" value="/plugins/ram.guard/scripts/rc.ramguard">
+<input type="hidden" name="#arg[1]" value="restart">
+
+Защита включена:
+: <select name="ENABLED">
+  <?=mk_option($rg_cfg['ENABLED'], 'yes', 'Да')?>
+  <?=mk_option($rg_cfg['ENABLED'], 'no', 'Нет')?>
+  </select>
+
+Порог предупреждения, %:
+: <input type="number" name="WARN_PCT" min="50" max="99" class="narrow" value="<?=htmlspecialchars($rg_cfg['WARN_PCT'])?>">
+
+> При такой загрузке RAM приходит уведомление Unraid со списком самых крупных контейнеров. Ничего не останавливается.
+
+Порог остановки контейнера, %:
+: <input type="number" name="CRIT_PCT" min="50" max="99" class="narrow" value="<?=htmlspecialchars($rg_cfg['CRIT_PCT'])?>">
+
+> Если загрузка RAM держится на этом уровне или выше, останавливается контейнер, который занимает больше всего памяти.
+> Занятая память считается как MemTotal - MemAvailable, то есть кеш файлов не учитывается.
+
+Держится выше порога, сек:
+: <input type="number" name="SUSTAIN" min="0" max="3600" class="narrow" value="<?=htmlspecialchars($rg_cfg['SUSTAIN'])?>">
+
+> Защита от кратковременных всплесков: контейнер останавливается, только если RAM выше порога остановки дольше этого времени. 0 — сразу.
+
+Интервал проверки, сек:
+: <input type="number" name="INTERVAL" min="1" max="300" class="narrow" value="<?=htmlspecialchars($rg_cfg['INTERVAL'])?>">
+
+Пауза после остановки, сек:
+: <input type="number" name="COOLDOWN" min="0" max="3600" class="narrow" value="<?=htmlspecialchars($rg_cfg['COOLDOWN'])?>">
+
+> Время, за которое память успевает освободиться. Если после паузы RAM всё ещё выше порога, будет остановлен следующий по размеру контейнер.
+
+Не останавливать контейнеры меньше, МБ:
+: <input type="number" name="MIN_CONTAINER_MB" min="0" max="1048576" class="narrow" value="<?=htmlspecialchars($rg_cfg['MIN_CONTAINER_MB'])?>">
+
+> Если память заняли VM, ZFS или сама система, остановка мелких контейнеров не поможет. Если крупнейший подходящий контейнер меньше этого размера, придёт только уведомление.
+
+Исключения:
+: <input type="text" name="EXCLUDE" class="wide" placeholder="mariadb, plex, binhex-*" value="<?=htmlspecialchars($rg_cfg['EXCLUDE'])?>">
+
+> Имена контейнеров, которые никогда не останавливаются, через запятую. Регистр не важен, можно использовать * и ?.
+
+Таймаут остановки, сек:
+: <input type="number" name="STOP_TIMEOUT" min="0" max="600" class="narrow" value="<?=htmlspecialchars($rg_cfg['STOP_TIMEOUT'])?>">
+
+> Сколько ждать корректного завершения (docker stop -t) перед принудительной остановкой.
+
+Считать ZFS ARC свободной памятью:
+: <select name="ZFS_ARC_FREE">
+  <?=mk_option($rg_cfg['ZFS_ARC_FREE'], 'yes', 'Да')?>
+  <?=mk_option($rg_cfg['ZFS_ARC_FREE'], 'no', 'Нет')?>
+  </select>
+
+> Linux показывает кеш ZFS (ARC) как занятую память, хотя он сам уменьшается при нехватке RAM. Без ZFS настройка ни на что не влияет.
+
+Уведомления Unraid:
+: <select name="NOTIFY">
+  <?=mk_option($rg_cfg['NOTIFY'], 'yes', 'Да')?>
+  <?=mk_option($rg_cfg['NOTIFY'], 'no', 'Нет')?>
+  </select>
+
+Повторять предупреждения не чаще, мин:
+: <input type="number" name="WARN_REPEAT" min="1" max="1440" class="narrow" value="<?=htmlspecialchars($rg_cfg['WARN_REPEAT'])?>">
+
+> Уведомления об остановке контейнера отправляются всегда.
+
+Тестовый режим:
+: <select name="DRY_RUN">
+  <?=mk_option($rg_cfg['DRY_RUN'], 'no', 'Нет')?>
+  <?=mk_option($rg_cfg['DRY_RUN'], 'yes', 'Да — только писать в журнал, что было бы остановлено')?>
+  </select>
+
+&nbsp;
+: <input type="submit" name="#apply" value="Применить"><input type="button" value="Готово" onclick="done()">
+</form>
+
+<script>
+function rgRefresh() {
+  $('#rg-top').text('Загрузка...');
+  $.get('/plugins/ram.guard/include/status.php', function(text) { $('#rg-top').text(text); })
+    .fail(function() { $('#rg-top').text('Не удалось получить данные'); });
+}
+$(rgRefresh);
+</script>

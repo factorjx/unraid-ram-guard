@@ -1,0 +1,320 @@
+#!/bin/bash
+# RAM Guard for Unraid: when RAM usage stays above the critical threshold,
+# stops the running Docker container that uses the most memory.
+#
+# Usage: ramguard run      - monitoring loop (started by rc.ramguard)
+#        ramguard status   - current RAM usage and containers by memory
+
+PLUGIN="ram.guard"
+DEFAULT_CFG="/usr/local/emhttp/plugins/$PLUGIN/default.cfg"
+USER_CFG="/boot/config/plugins/$PLUGIN/$PLUGIN.cfg"
+STATE_DIR="/tmp/$PLUGIN"
+STATUS_FILE="$STATE_DIR/status.ini"
+PID_FILE="/var/run/ramguard.pid"
+LOG_FILE="/var/log/$PLUGIN.log"
+LOG_MAX_BYTES=524288
+MEMINFO="/proc/meminfo"
+ARCSTATS="/proc/spl/kstat/zfs/arcstats"
+NOTIFY_BIN="/usr/local/emhttp/webGui/scripts/notify"
+
+CFG_KEYS="ENABLED WARN_PCT CRIT_PCT SUSTAIN INTERVAL COOLDOWN MIN_CONTAINER_MB STOP_TIMEOUT EXCLUDE ZFS_ARC_FREE NOTIFY WARN_REPEAT DRY_RUN"
+
+# Loop state
+OVER_SINCE=0
+LAST_ACTION=0
+PREV_STATE=""
+declare -A LAST_SENT=()
+
+# --- config ------------------------------------------------------------------
+
+# set_int NAME MIN MAX DEFAULT: keeps $NAME if it is an integer in [MIN, MAX]
+set_int() {
+  local -n ref=$1
+  if [[ $ref =~ ^[0-9]{1,7}$ ]] && (( 10#$ref >= $2 && 10#$ref <= $3 )); then
+    ref=$((10#$ref))
+  else
+    ref=$4
+  fi
+}
+
+# set_bool NAME DEFAULT
+set_bool() {
+  local -n ref=$1
+  [[ $ref == yes || $ref == no ]] || ref=$2
+}
+
+# Reads default.cfg, then the user's settings from the flash drive. The files
+# are parsed rather than sourced, and only known keys are accepted.
+load_config() {
+  local f line
+  # shellcheck disable=SC2086
+  unset $CFG_KEYS
+  for f in "$DEFAULT_CFG" "$USER_CFG"; do
+    [[ -r $f ]] || continue
+    while IFS= read -r line || [[ -n $line ]]; do
+      line=${line%$'\r'}
+      [[ $line =~ ^([A-Z_]+)=\"?([^\"]*)\"?$ ]] || continue
+      [[ " $CFG_KEYS " == *" ${BASH_REMATCH[1]} "* ]] || continue
+      printf -v "${BASH_REMATCH[1]}" '%s' "${BASH_REMATCH[2]}"
+    done <"$f"
+  done
+  set_bool ENABLED yes
+  set_int WARN_PCT 50 99 90
+  set_int CRIT_PCT 50 99 95
+  if (( WARN_PCT > CRIT_PCT )); then WARN_PCT=$CRIT_PCT; fi
+  set_int SUSTAIN 0 3600 15
+  set_int INTERVAL 1 300 5
+  set_int COOLDOWN 0 3600 120
+  set_int MIN_CONTAINER_MB 0 1048576 512
+  set_int STOP_TIMEOUT 0 600 30
+  set_bool ZFS_ARC_FREE yes
+  set_bool NOTIFY yes
+  set_int WARN_REPEAT 1 1440 30
+  set_bool DRY_RUN no
+  EXCLUDE=${EXCLUDE:-}
+}
+
+# --- helpers -----------------------------------------------------------------
+
+log() {
+  local ts
+  printf -v ts '%(%Y-%m-%d %H:%M:%S)T' -1
+  if [[ -f $LOG_FILE ]] && (( $(stat -c %s "$LOG_FILE") > LOG_MAX_BYTES )); then
+    mv -f "$LOG_FILE" "$LOG_FILE.1"
+  fi
+  printf '%s %s\n' "$ts" "$*" >>"$LOG_FILE"
+}
+
+# Important events also go to the Unraid syslog
+syslog() {
+  log "$*"
+  logger -t ramguard -- "$*"
+}
+
+# notify LEVEL SUBJECT DESCRIPTION; LEVEL is normal, warning or alert
+notify() {
+  [[ $NOTIFY == yes && -x $NOTIFY_BIN ]] || return 0
+  "$NOTIFY_BIN" -e "RAM Guard" -s "$2" -d "$3" -i "$1" >/dev/null 2>&1
+}
+
+# may_notify KEY: true at most once per WARN_REPEAT minutes for each KEY
+may_notify() {
+  local now
+  [[ $NOTIFY == yes ]] || return 1
+  printf -v now '%(%s)T' -1
+  (( now - ${LAST_SENT[$1]:-0} >= WARN_REPEAT * 60 )) || return 1
+  LAST_SENT[$1]=$now
+}
+
+human() {
+  awk -v b="$1" 'BEGIN {
+    if (b >= 1073741824) printf "%.1f GiB", b / 1073741824
+    else if (b >= 1048576) printf "%d MiB", b / 1048576
+    else printf "%d KiB", b / 1024 }'
+}
+
+# is_excluded NAME: matches NAME against EXCLUDE (comma/space separated,
+# case-insensitive, shell wildcards allowed)
+is_excluded() {
+  local name=${1,,} pattern
+  local -a patterns
+  IFS=$', \t' read -ra patterns <<<"$EXCLUDE"
+  for pattern in "${patterns[@]}"; do
+    # shellcheck disable=SC2053
+    [[ $name == ${pattern,,} ]] && return 0
+  done
+  return 1
+}
+
+# --- measurements ------------------------------------------------------------
+
+# Prints "<used %> <total kB> <available kB> <ARC counted as free, kB>".
+# Used memory is MemTotal - MemAvailable, so page cache does not count. The ZFS
+# ARC is reported by Linux as used, but it shrinks under pressure down to
+# c_min, so everything above c_min may be counted as free.
+read_mem() {
+  local arc=0
+  if [[ $ZFS_ARC_FREE == yes && -r $ARCSTATS ]]; then
+    arc=$(awk '$1 == "size" { s = $3 } $1 == "c_min" { m = $3 }
+      END { r = s - m; printf "%d\n", (r > 0 ? r / 1024 : 0) }' "$ARCSTATS")
+  fi
+  awk -v arc="$arc" '$1 == "MemTotal:" { t = $2 } $1 == "MemAvailable:" { a = $2 }
+    END { a += arc; if (a > t) a = t; printf "%d %d %d %d\n", (t > 0 ? (t - a) * 100 / t : 0), t, a, arc }' "$MEMINFO"
+}
+
+# Prints "<bytes>\t<name>" for every running container, biggest first.
+# Sizes are the same numbers the Docker page shows (page cache excluded).
+container_usage() {
+  timeout 60 docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}' 2>/dev/null | awk -F'\t' '
+    BEGIN {
+      split("B KiB MiB GiB TiB", bin, " "); for (i = 1; i <= 5; i++) mul[bin[i]] = 1024 ^ (i - 1)
+      split("kB MB GB TB", dec, " "); for (i = 1; i <= 4; i++) mul[dec[i]] = 1000 ^ i
+    }
+    match($2, /^[0-9.]+/) {
+      unit = substr($2, RLENGTH + 1); sub(/ .*/, "", unit)
+      if (unit in mul) printf "%.0f\t%s\n", substr($2, 1, RLENGTH) * mul[unit], $1
+    }' | sort -t $'\t' -k1,1nr
+}
+
+# Reads container_usage output, prints the line of the container to stop: the
+# biggest one that is not excluded, if it uses at least MIN_CONTAINER_MB.
+pick_victim() {
+  local bytes name
+  while IFS=$'\t' read -r bytes name; do
+    [[ -n $name ]] || continue
+    is_excluded "$name" && continue
+    (( bytes >= MIN_CONTAINER_MB * 1048576 )) && printf '%s\t%s\n' "$bytes" "$name"
+    return
+  done
+}
+
+# Reads container_usage output, prints "name (size), ..." for the first N lines
+summarize() {
+  local bytes name out=""
+  while IFS=$'\t' read -r bytes name; do
+    [[ -n $name ]] && out+="${out:+, }$name ($(human "$bytes"))"
+  done < <(head -n "$1")
+  printf '%s' "${out:-нет запущенных контейнеров}"
+}
+
+# --- actions -----------------------------------------------------------------
+
+stop_biggest() {
+  local pct=$1 list bytes="" name="" size
+  list=$(container_usage)
+  IFS=$'\t' read -r bytes name < <(pick_victim <<<"$list")
+
+  if [[ -z $name ]]; then
+    log "RAM ${pct}%: нечего останавливать (контейнеры исключены или меньше ${MIN_CONTAINER_MB} МБ)"
+    if may_notify nothing; then
+      notify alert "RAM загружена на ${pct}%" "Нет контейнера для остановки. Крупнейшие: $(summarize 3 <<<"$list")"
+    fi
+    return
+  fi
+
+  size=$(human "$bytes")
+  if [[ $DRY_RUN == yes ]]; then
+    log "[тест] RAM ${pct}%: был бы остановлен контейнер $name ($size)"
+    if may_notify dryrun; then
+      notify warning "[тест] RAM загружена на ${pct}%" "Был бы остановлен контейнер $name ($size). Включён тестовый режим, ничего не остановлено."
+    fi
+    return
+  fi
+
+  syslog "RAM ${pct}% (порог ${CRIT_PCT}%): останавливаю контейнер $name ($size)"
+  if timeout $(( STOP_TIMEOUT + 60 )) docker stop -t "$STOP_TIMEOUT" "$name" >/dev/null 2>&1; then
+    syslog "Контейнер $name остановлен"
+    notify alert "Остановлен контейнер $name" "RAM была загружена на ${pct}%. Контейнер $name занимал $size и был остановлен."
+  else
+    syslog "Ошибка: не удалось остановить контейнер $name"
+    notify alert "Не удалось остановить контейнер $name" "RAM загружена на ${pct}%, но docker stop $name завершился с ошибкой."
+  fi
+}
+
+write_status() {
+  printf 'updated="%s"\npct="%s"\ntotal_kb="%s"\navail_kb="%s"\narc_kb="%s"\nstate="%s"\n' "$@" >"$STATUS_FILE.tmp" &&
+    mv -f "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+
+# One check: measure, warn, and stop a container if RAM has stayed above
+# CRIT_PCT for SUSTAIN seconds and the last action was COOLDOWN seconds ago.
+tick() {
+  local now pct total_kb avail_kb arc_kb state=ok
+  printf -v now '%(%s)T' -1
+  read -r pct total_kb avail_kb arc_kb < <(read_mem)
+
+  if (( pct >= CRIT_PCT )); then
+    state=critical
+    (( OVER_SINCE )) || OVER_SINCE=$now
+  else
+    OVER_SINCE=0
+    (( pct >= WARN_PCT )) && state=warning
+  fi
+  write_status "$now" "$pct" "$total_kb" "$avail_kb" "$arc_kb" "$state"
+
+  if [[ $state != "$PREV_STATE" ]]; then
+    case $state in
+      ok) [[ -n $PREV_STATE ]] && log "RAM ${pct}%: в норме" ;;
+      warning) log "RAM ${pct}%: выше порога предупреждения (${WARN_PCT}%)" ;;
+      critical) log "RAM ${pct}%: выше порога остановки (${CRIT_PCT}%)" ;;
+    esac
+    PREV_STATE=$state
+  fi
+
+  if [[ $state == warning ]] && may_notify warning; then
+    notify warning "RAM загружена на ${pct}%" "Крупнейшие контейнеры: $(container_usage | summarize 3). Остановка начнётся при ${CRIT_PCT}%."
+  fi
+
+  if [[ $state == critical ]] && (( now - OVER_SINCE >= SUSTAIN && now - LAST_ACTION >= COOLDOWN )); then
+    LAST_ACTION=$now
+    stop_biggest "$pct"
+  fi
+}
+
+run() {
+  local pid
+  load_config
+  if [[ $ENABLED != yes ]]; then
+    log "Защита выключена в настройках, демон не запущен"
+    exit 0
+  fi
+  pid=$(cat "$PID_FILE" 2>/dev/null)
+  if [[ $pid =~ ^[0-9]+$ && $pid != "$$" ]] && grep -qa 'scripts/ramguard' "/proc/$pid/cmdline" 2>/dev/null; then
+    echo "RAM Guard уже запущен (pid $pid)"
+    exit 0
+  fi
+  echo $$ >"$PID_FILE"
+  mkdir -p "$STATE_DIR"
+  trap 'load_config; log "Настройки перечитаны"' HUP
+  trap 'rm -f "$PID_FILE" "$STATUS_FILE"; log "Демон остановлен"; exit 0' TERM INT
+
+  local mode=""
+  [[ $DRY_RUN == yes ]] && mode=", ТЕСТОВЫЙ РЕЖИМ"
+  syslog "Демон запущен: предупреждение при ${WARN_PCT}%, остановка контейнера при ${CRIT_PCT}% дольше ${SUSTAIN} с${mode}"
+
+  while :; do
+    tick
+    sleep "$INTERVAL" &
+    wait $!
+  done
+}
+
+status() {
+  local pct total_kb avail_kb arc_kb list victim="" bytes name mark
+  read -r pct total_kb avail_kb arc_kb < <(read_mem)
+  printf 'Занято RAM: %s%% (%s из %s)' "$pct" \
+    "$(human $(( (total_kb - avail_kb) * 1024 )))" "$(human $(( total_kb * 1024 )))"
+  (( arc_kb > 0 )) && printf ', ZFS ARC %s учтён как свободная' "$(human $(( arc_kb * 1024 )))"
+  printf '\nПороги: предупреждение %s%%, остановка %s%%' "$WARN_PCT" "$CRIT_PCT"
+  [[ $DRY_RUN == yes ]] && printf ' (тестовый режим)'
+  printf '\n\n'
+
+  list=$(container_usage)
+  if [[ -z $list ]]; then
+    echo "Нет запущенных контейнеров (или Docker не запущен)"
+    return
+  fi
+  IFS=$'\t' read -r _ victim < <(pick_victim <<<"$list")
+  echo "Контейнеры по потреблению RAM:"
+  while IFS=$'\t' read -r bytes name; do
+    mark=""
+    if is_excluded "$name"; then
+      mark="исключён"
+    elif [[ $name == "$victim" ]]; then
+      mark="<- будет остановлен первым"
+    fi
+    printf '  %-32s %10s  %s\n' "$name" "$(human "$bytes")" "$mark"
+  done <<<"$list"
+  [[ -n $victim ]] || echo "Нет контейнера, который можно остановить (все исключены или меньше ${MIN_CONTAINER_MB} МБ)"
+}
+
+main() {
+  case $1 in
+    run) run ;;
+    status) load_config; status ;;
+    *) echo "Использование: $0 {run|status}" >&2; exit 1 ;;
+  esac
+}
+
+# Run main only when executed, so the functions can be sourced by tests.
+[[ ${BASH_SOURCE[0]} == "$0" ]] && { main "$@"; exit; }
