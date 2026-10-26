@@ -20,6 +20,8 @@ All thresholds and intervals can be changed in the settings.
 
    Click **Install**. The same over SSH:
    `plugin install https://raw.githubusercontent.com/factorjx/unraid-ram-guard/main/ram.guard.plg`
+
+   Use this `raw.githubusercontent.com` link. A `github.com/.../blob/...` link from the GitHub file page downloads the web page instead of the plugin, and Unraid fails with *XML file doesn't exist or xml parse error*.
 2. Settings: **Settings → User Utilities → RAM Guard**.
 
 The plugin is saved to `/boot/config/plugins/` and starts on every boot. New versions show up on the **Plugins** tab after **Check for Updates**.

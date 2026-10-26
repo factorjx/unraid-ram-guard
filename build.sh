@@ -40,6 +40,9 @@ cat <<EOF
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;"${PLUGIN_URL:+ pluginURL=\"&pluginURL;\"} icon="shield" min="6.9.0">
 
 <CHANGES>
+### 2026.10.26.2
+- Fix: updates now replace the plugin files (the plugin manager does not overwrite existing files)
+
 ### 2026.10.26.1
 - English plugin description and README
 
@@ -49,10 +52,11 @@ cat <<EOF
 - ZFS ARC counted as free memory
 </CHANGES>
 
-<!-- Stop a running daemon before its script is overwritten -->
+<!-- Stop a running daemon and remove the old files: the plugin manager skips files that already exist -->
 <FILE Run="/bin/bash">
 <INLINE>
 if [ -x &plugdir;/scripts/rc.ramguard ]; then &plugdir;/scripts/rc.ramguard stop; fi
+rm -rf &plugdir;
 mkdir -p &plugdir;/scripts &plugdir;/include
 </INLINE>
 </FILE>

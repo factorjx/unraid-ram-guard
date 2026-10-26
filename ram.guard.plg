@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "ram.guard">
 <!ENTITY author    "factorjx">
-<!ENTITY version   "2026.10.26.1">
+<!ENTITY version   "2026.10.26.2">
 <!ENTITY launch    "Settings/RamGuard">
 <!ENTITY plugdir   "/usr/local/emhttp/plugins/&name;">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/factorjx/unraid-ram-guard/main/ram.guard.plg">
@@ -11,6 +11,9 @@
 <PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;" pluginURL="&pluginURL;" icon="shield" min="6.9.0">
 
 <CHANGES>
+### 2026.10.26.2
+- Fix: updates now replace the plugin files (the plugin manager does not overwrite existing files)
+
 ### 2026.10.26.1
 - English plugin description and README
 
@@ -20,10 +23,11 @@
 - ZFS ARC counted as free memory
 </CHANGES>
 
-<!-- Stop a running daemon before its script is overwritten -->
+<!-- Stop a running daemon and remove the old files: the plugin manager skips files that already exist -->
 <FILE Run="/bin/bash">
 <INLINE>
 if [ -x &plugdir;/scripts/rc.ramguard ]; then &plugdir;/scripts/rc.ramguard stop; fi
+rm -rf &plugdir;
 mkdir -p &plugdir;/scripts &plugdir;/include
 </INLINE>
 </FILE>
